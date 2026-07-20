@@ -30,9 +30,10 @@ import struct
 import fcntl
 import termios
 import socket
+import traceback
 
 # ---------- Configuration ----------
-SERVER_URL = "https://livtrmnlasdasd.onrender.com"   # <-- updated to HTTPS
+SERVER_URL = "https://livtrmnlasdasd.onrender.com"   # <-- HTTPS
 CLIENT_NAME = socket.gethostname()
 
 # ---------- Terminal session management ----------
@@ -64,11 +65,13 @@ def spawn_terminal(session_id, cols=80, rows=24):
                 if master_fd in r:
                     data = os.read(master_fd, 1024)
                     if data:
-                        sio.emit('terminal_output', {'session_id': session_id, 'output': data.decode('utf-8', errors='replace')})
+                        if sio.connected:
+                            sio.emit('terminal_output', {'session_id': session_id, 'output': data.decode('utf-8', errors='replace')})
                     else:
                         break
             except (OSError, ValueError):
                 break
+        # Clean up
         if session_id in sessions:
             sessions[session_id]['process'].terminate()
             del sessions[session_id]
@@ -113,20 +116,26 @@ def get_metrics():
 def send_metrics():
     while True:
         try:
-            metrics = get_metrics()
-            sio.emit('metrics', {'metrics': metrics})
+            if sio.connected:
+                metrics = get_metrics()
+                sio.emit('metrics', {'metrics': metrics})
+            else:
+                time.sleep(1)
         except Exception as e:
             print(f"Metrics error: {e}")
         time.sleep(2)
 
 # ---------- Socket.IO client ----------
-sio = socketio.Client(reconnection=True, reconnection_attempts=0)
+sio = socketio.Client(reconnection=True, reconnection_attempts=0, reconnection_delay=1, reconnection_delay_max=5)
 
 @sio.event
 def connect():
     print("Connected to server")
     sio.emit('register_client', {'name': CLIENT_NAME})
-    threading.Thread(target=send_metrics, daemon=True).start()
+    # Start metrics thread only once
+    if not hasattr(sio, '_metrics_thread_started'):
+        sio._metrics_thread_started = True
+        threading.Thread(target=send_metrics, daemon=True).start()
 
 @sio.event
 def disconnect():
@@ -137,10 +146,12 @@ def disconnect():
 @sio.event
 def spawn_terminal(data):
     session_id = data.get('session_id')
+    print(f"[SPAWN] Received spawn for {session_id}")
     if session_id in sessions:
         return
     spawn_terminal(session_id)
     sio.emit('terminal_ready', {'session_id': session_id})
+    print(f"[SPAWN] Terminal {session_id} ready")
 
 @sio.event
 def terminal_input(data):
@@ -167,12 +178,13 @@ def close_terminal(data):
 
 @sio.event
 def ping():
-    sio.emit('pong')
+    if sio.connected:
+        sio.emit('pong')
 
 # ---------- Main ----------
 if __name__ == '__main__':
     try:
-        sio.connect(SERVER_URL, wait_timeout=10)   # increase timeout if needed
+        sio.connect(SERVER_URL, wait_timeout=10)
         print("Client running. Press Ctrl+C to exit.")
         while True:
             time.sleep(1)
@@ -181,5 +193,5 @@ if __name__ == '__main__':
         sio.disconnect()
         sys.exit(0)
     except Exception as e:
-        print(f"Connection error: {e}")
+        print(f"Connection error: {e}\n{traceback.format_exc()}")
         sys.exit(1)
