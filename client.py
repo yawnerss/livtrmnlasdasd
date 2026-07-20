@@ -3,7 +3,6 @@ import sys
 import subprocess
 import importlib
 
-# ---------- Auto‑install missing modules ----------
 def install(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
@@ -21,22 +20,11 @@ except ImportError:
     install("psutil")
     import psutil
 
-import os
-import time
-import threading
-import pty
-import select
-import struct
-import fcntl
-import termios
-import socket
-import traceback
+import os, time, threading, pty, select, struct, fcntl, termios, socket, traceback
 
-# ---------- Configuration ----------
-SERVER_URL = "https://livtrmnlasdasd.onrender.com"   # <-- HTTPS
+SERVER_URL = "https://livtrmnlasdasd.onrender.com"
 CLIENT_NAME = socket.gethostname()
 
-# ---------- Terminal session management ----------
 sessions = {}
 output_threads = {}
 
@@ -46,18 +34,10 @@ def spawn_terminal(session_id, cols=80, rows=24):
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
     process = subprocess.Popen(
         ['/bin/bash', '-i'],
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        preexec_fn=os.setsid,
-        close_fds=True
+        stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+        preexec_fn=os.setsid, close_fds=True
     )
-    sessions[session_id] = {
-        'process': process,
-        'master_fd': master_fd,
-        'slave_fd': slave_fd,
-        'pid': process.pid
-    }
+    sessions[session_id] = {'process': process, 'master_fd': master_fd, 'slave_fd': slave_fd, 'pid': process.pid}
     def read_output():
         while session_id in sessions:
             try:
@@ -71,7 +51,6 @@ def spawn_terminal(session_id, cols=80, rows=24):
                         break
             except (OSError, ValueError):
                 break
-        # Clean up
         if session_id in sessions:
             sessions[session_id]['process'].terminate()
             del sessions[session_id]
@@ -99,40 +78,31 @@ def resize_terminal(session_id, cols, rows):
         winsize = struct.pack("HHHH", rows, cols, 0, 0)
         fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
-# ---------- Metrics collection ----------
 def get_metrics():
     cpu = psutil.cpu_percent(interval=0.5)
     ram = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
     net = psutil.net_io_counters()
     net_speed = f"{net.bytes_sent//1024} KB/s ↑ {net.bytes_recv//1024} KB/s ↓"
-    return {
-        'cpu': cpu,
-        'ram_percent': ram.percent,
-        'disk_percent': disk.percent,
-        'net_speed': net_speed
-    }
+    return {'cpu': cpu, 'ram_percent': ram.percent, 'disk_percent': disk.percent, 'net_speed': net_speed}
 
 def send_metrics():
     while True:
         try:
             if sio.connected:
-                metrics = get_metrics()
-                sio.emit('metrics', {'metrics': metrics})
+                sio.emit('metrics', {'metrics': get_metrics()})
             else:
                 time.sleep(1)
         except Exception as e:
             print(f"Metrics error: {e}")
         time.sleep(2)
 
-# ---------- Socket.IO client ----------
-sio = socketio.Client(reconnection=True, reconnection_attempts=0, reconnection_delay=1, reconnection_delay_max=5)
+sio = socketio.Client(reconnection=True, reconnection_attempts=0)
 
 @sio.event
 def connect():
     print("Connected to server")
     sio.emit('register_client', {'name': CLIENT_NAME})
-    # Start metrics thread only once
     if not hasattr(sio, '_metrics_thread_started'):
         sio._metrics_thread_started = True
         threading.Thread(target=send_metrics, daemon=True).start()
@@ -146,42 +116,34 @@ def disconnect():
 @sio.event
 def spawn_terminal(data):
     session_id = data.get('session_id')
-    print(f"[SPAWN] Received spawn for {session_id}")
     if session_id in sessions:
         return
     spawn_terminal(session_id)
     sio.emit('terminal_ready', {'session_id': session_id})
-    print(f"[SPAWN] Terminal {session_id} ready")
 
 @sio.event
 def terminal_input(data):
     session_id = data.get('session_id')
     input_data = data.get('data')
     if session_id in sessions:
-        master_fd = sessions[session_id]['master_fd']
         try:
-            os.write(master_fd, input_data.encode())
+            os.write(sessions[session_id]['master_fd'], input_data.encode())
         except Exception as e:
             print(f"Write error: {e}")
 
 @sio.event
 def terminal_resize(data):
-    session_id = data.get('session_id')
-    cols = data.get('cols')
-    rows = data.get('rows')
-    resize_terminal(session_id, cols, rows)
+    resize_terminal(data.get('session_id'), data.get('cols'), data.get('rows'))
 
 @sio.event
 def close_terminal(data):
-    session_id = data.get('session_id')
-    close_terminal(session_id)
+    close_terminal(data.get('session_id'))
 
 @sio.event
 def ping():
     if sio.connected:
         sio.emit('pong')
 
-# ---------- Main ----------
 if __name__ == '__main__':
     try:
         sio.connect(SERVER_URL, wait_timeout=10)
