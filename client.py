@@ -29,60 +29,72 @@ sessions = {}
 output_threads = {}
 
 def spawn_terminal(session_id, cols=80, rows=24):
-    master_fd, slave_fd = pty.openpty()
-    winsize = struct.pack("HHHH", rows, cols, 0, 0)
-    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+    try:
+        master_fd, slave_fd = pty.openpty()
+        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
-    env = os.environ.copy()
-    env['TERM'] = 'xterm-256color'
-    env['PS1'] = '\\[\\033[01;32m\\]\\u@\\h\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ '
+        env = os.environ.copy()
+        env['TERM'] = 'xterm-256color'
+        env['PS1'] = '\\[\\033[01;32m\\]\\u@\\h\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ '
 
-    process = subprocess.Popen(
-        ['/bin/bash', '-i'],
-        stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-        preexec_fn=os.setsid,
-        close_fds=True,
-        env=env
-    )
-    sessions[session_id] = {
-        'process': process,
-        'master_fd': master_fd,
-        'slave_fd': slave_fd,
-        'pid': process.pid
-    }
+        # Choose shell
+        shell = '/bin/bash'
+        if not os.path.exists(shell):
+            shell = '/bin/sh'
+            print(f"[WARN] /bin/bash not found, using {shell}")
 
-    # Force a newline to make bash print the prompt
-    time.sleep(0.5)
-    os.write(master_fd, b'\n')
+        process = subprocess.Popen(
+            [shell, '-i'],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            preexec_fn=os.setsid,
+            close_fds=True,
+            env=env
+        )
+        sessions[session_id] = {
+            'process': process,
+            'master_fd': master_fd,
+            'slave_fd': slave_fd,
+            'pid': process.pid
+        }
 
-    def read_output():
-        while session_id in sessions:
-            try:
-                r, _, _ = select.select([master_fd], [], [], 0.1)
-                if master_fd in r:
-                    data = os.read(master_fd, 1024)
-                    if data:
-                        print(f"[READ] {len(data)} bytes from {session_id}")
-                        if sio.connected:
-                            sio.emit('terminal_output', {
-                                'session_id': session_id,
-                                'output': data.decode('utf-8', errors='replace')
-                            })
-                    else:
-                        break
-            except (OSError, ValueError) as e:
-                print(f"[READ ERROR] {e}")
-                break
-        if session_id in sessions:
-            sessions[session_id]['process'].terminate()
-            del sessions[session_id]
-            print(f"[CLEANUP] {session_id} removed")
+        # Force a newline to trigger prompt
+        time.sleep(0.5)
+        os.write(master_fd, b'\n')
 
-    thread = threading.Thread(target=read_output, daemon=True)
-    thread.start()
-    output_threads[session_id] = thread
-    print(f"[SPAWN] {session_id} PID {process.pid}")
-    return session_id
+        def read_output():
+            while session_id in sessions:
+                try:
+                    r, _, _ = select.select([master_fd], [], [], 0.1)
+                    if master_fd in r:
+                        data = os.read(master_fd, 1024)
+                        if data:
+                            print(f"[READ] {len(data)} bytes from {session_id}")
+                            if sio.connected:
+                                sio.emit('terminal_output', {
+                                    'session_id': session_id,
+                                    'output': data.decode('utf-8', errors='replace')
+                                })
+                        else:
+                            break
+                except Exception as e:
+                    print(f"[READ ERROR] {e}")
+                    break
+            if session_id in sessions:
+                sessions[session_id]['process'].terminate()
+                del sessions[session_id]
+                print(f"[CLEANUP] {session_id} removed")
+
+        thread = threading.Thread(target=read_output, daemon=True)
+        thread.start()
+        output_threads[session_id] = thread
+        print(f"[SPAWN] {session_id} PID {process.pid} shell={shell}")
+        return session_id
+    except Exception as e:
+        print(f"[SPAWN ERROR] {e}\n{traceback.format_exc()}")
+        return None
 
 def close_terminal(session_id):
     if session_id in sessions:
@@ -143,8 +155,12 @@ def spawn_terminal(data):
     session_id = data.get('session_id')
     if session_id in sessions:
         return
-    spawn_terminal(session_id)
-    sio.emit('terminal_ready', {'session_id': session_id})
+    result = spawn_terminal(session_id)
+    if result:
+        sio.emit('terminal_ready', {'session_id': session_id})
+    else:
+        # Send error to server (so UI can show it)
+        sio.emit('terminal_error', {'session_id': session_id, 'error': 'Failed to spawn shell'})
 
 @sio.event
 def terminal_input(data):
