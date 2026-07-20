@@ -21,7 +21,7 @@ except ImportError:
 
 import os, time, threading, pty, select, struct, fcntl, termios, socket, traceback
 
-SERVER_URL = "https://live-terminal-ricardo-cum.onrender.com"
+SERVER_URL = "server url"
 CLIENT_NAME = socket.gethostname()
 
 sessions = {}        # session_id -> {'process', 'master_fd', 'pid'}
