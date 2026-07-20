@@ -32,17 +32,15 @@ import termios
 import socket
 
 # ---------- Configuration ----------
-SERVER_URL = "https://livtrmnlasdasd.onrender.com"  # CHANGE THIS
+SERVER_URL = "https://livtrmnlasdasd.onrender.com"   # <-- updated to HTTPS
 CLIENT_NAME = socket.gethostname()
 
 # ---------- Terminal session management ----------
-sessions = {}  # session_id -> {'process': proc, 'master_fd': fd, 'slave_fd': fd}
+sessions = {}
 output_threads = {}
 
 def spawn_terminal(session_id, cols=80, rows=24):
-    """Spawn a bash shell with PTY."""
     master_fd, slave_fd = pty.openpty()
-    # Set window size
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
     process = subprocess.Popen(
@@ -59,7 +57,6 @@ def spawn_terminal(session_id, cols=80, rows=24):
         'slave_fd': slave_fd,
         'pid': process.pid
     }
-    # Start a thread to read output
     def read_output():
         while session_id in sessions:
             try:
@@ -72,7 +69,6 @@ def spawn_terminal(session_id, cols=80, rows=24):
                         break
             except (OSError, ValueError):
                 break
-        # Clean up if process ended
         if session_id in sessions:
             sessions[session_id]['process'].terminate()
             del sessions[session_id]
@@ -106,9 +102,6 @@ def get_metrics():
     ram = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
     net = psutil.net_io_counters()
-    # Compute upload/download speeds (bytes per second over 1s interval)
-    # We'll keep it simple: send current total bytes, UI can compute speed
-    # For now, just send a formatted string
     net_speed = f"{net.bytes_sent//1024} KB/s ↑ {net.bytes_recv//1024} KB/s ↓"
     return {
         'cpu': cpu,
@@ -179,7 +172,7 @@ def ping():
 # ---------- Main ----------
 if __name__ == '__main__':
     try:
-        sio.connect(SERVER_URL)
+        sio.connect(SERVER_URL, wait_timeout=10)   # increase timeout if needed
         print("Client running. Press Ctrl+C to exit.")
         while True:
             time.sleep(1)
