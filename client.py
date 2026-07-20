@@ -32,7 +32,7 @@ import termios
 import socket
 
 # ---------- Configuration ----------
-SERVER_URL = "http://your-server-ip:5000"  # CHANGE THIS
+SERVER_URL = "https://livtrmnlasdasd.onrender.com:5000"  # CHANGE THIS
 CLIENT_NAME = socket.gethostname()
 
 # ---------- Terminal session management ----------
