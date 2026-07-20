@@ -9,11 +9,11 @@ import select
 import fcntl
 import termios
 import struct
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request   # <-- added request
 from flask_socketio import SocketIO, emit, disconnect
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'server'
+app.config['SECRET_KEY'] = 'change-this-secret-key-in-production'
 socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25)
 
 # Data structures
@@ -336,11 +336,10 @@ def index():
 
 # ---------- SocketIO Events ----------
 @socketio.on('connect')
-def handle_connect():
+def handle_connect(auth=None):          # <-- added auth parameter
     print(f"Client connected: {request.sid}")
     clients[request.sid] = {'name': request.sid[:8], 'metrics': {}}
     terminal_sessions[request.sid] = {}
-    # Broadcast updated list
     emit('client_list', {sid: {'name': data['name'], 'metrics': data['metrics']} for sid, data in clients.items()}, broadcast=True)
 
 @socketio.on('disconnect')
@@ -377,22 +376,17 @@ def handle_metrics(data):
 
 @socketio.on('new_terminal')
 def handle_new_terminal():
-    # Generate a unique session ID
     session_id = f"term_{int(time.time())}_{request.sid[:4]}"
-    # Tell the client to spawn a new shell
     emit('spawn_terminal', {'session_id': session_id}, room=request.sid)
-    # Store placeholder on server side (for reference)
     terminal_sessions.setdefault(request.sid, {})[session_id] = {'created': True}
-    return session_id  # send back to UI
+    return session_id
 
 @socketio.on('terminal_ready')
 def handle_terminal_ready(data):
-    # Client confirms terminal is ready – we can store more info if needed
     pass
 
 @socketio.on('terminal_input')
 def handle_terminal_input(data):
-    # Forward input to client
     sid = request.sid
     session_id = data.get('sessionId')
     input_data = data.get('data')
@@ -418,7 +412,6 @@ def handle_close_terminal(data):
 
 @socketio.on('terminal_output')
 def handle_terminal_output(data):
-    # Broadcast terminal output to all UI clients (or we can target specific rooms)
     emit('terminal_output', {'sessionId': data['session_id'], 'output': data['output']}, broadcast=True)
 
 @socketio.on('ping')
