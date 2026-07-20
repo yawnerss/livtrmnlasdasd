@@ -28,8 +28,6 @@ sessions = {}        # session_id -> {'process', 'master_fd', 'pid'}
 output_threads = {}  # session_id -> Thread
 
 # ---------- PTY helpers ----------
-# FIX: renamed from spawn_terminal / close_terminal to avoid shadowing the @sio.event handlers
-
 def _spawn_terminal(session_id, cols=80, rows=24):
     """Spawn a PTY-backed shell and start streaming its output."""
     try:
@@ -54,9 +52,7 @@ def _spawn_terminal(session_id, cols=80, rows=24):
             env=env
         )
 
-        # FIX: close slave_fd in the parent — leaving it open causes the PTY master
-        # to never receive EOF and the terminal hangs.
-        os.close(slave_fd)
+        os.close(slave_fd)  # important: close slave in parent
 
         sessions[session_id] = {
             'process': process,
@@ -64,7 +60,6 @@ def _spawn_terminal(session_id, cols=80, rows=24):
             'pid': process.pid,
         }
 
-        # Trigger the initial prompt
         time.sleep(0.3)
         os.write(master_fd, b'\n')
 
@@ -85,13 +80,12 @@ def _spawn_terminal(session_id, cols=80, rows=24):
                                 })
                         else:
                             break
-                    # Exit loop if shell died
                     if session_id in sessions and sessions[session_id]['process'].poll() is not None:
                         break
                 except Exception as e:
                     print(f"[READ ERROR] {session_id}: {e}")
                     break
-            # Cleanup
+            # Cleanup only if the process died – do NOT remove on disconnect
             if session_id in sessions:
                 try:
                     sessions[session_id]['process'].terminate()
@@ -99,7 +93,7 @@ def _spawn_terminal(session_id, cols=80, rows=24):
                     pass
                 sessions.pop(session_id, None)
                 output_threads.pop(session_id, None)
-                print(f"[CLEANUP] {session_id} removed")
+                print(f"[CLEANUP] {session_id} removed (process died)")
 
         t = threading.Thread(target=read_output, daemon=True)
         t.start()
@@ -113,7 +107,7 @@ def _spawn_terminal(session_id, cols=80, rows=24):
 
 
 def _close_terminal(session_id):
-    """Terminate and clean up a PTY session."""
+    """Terminate and clean up a PTY session (called only on explicit close)."""
     sess = sessions.pop(session_id, None)
     if not sess:
         return
@@ -130,7 +124,6 @@ def _close_terminal(session_id):
 
 
 def _resize_terminal(session_id, cols, rows):
-    """Resize the PTY window."""
     sess = sessions.get(session_id)
     if not sess:
         return
@@ -165,6 +158,17 @@ def send_metrics():
         time.sleep(2)
 
 
+def keep_alive_ping():
+    """Send a ping every 30 seconds to keep the connection alive."""
+    while True:
+        time.sleep(30)
+        if sio.connected:
+            try:
+                sio.emit('ping')  # or 'pong' – server should respond accordingly
+            except Exception:
+                pass
+
+
 # ---------- Socket.IO ----------
 sio = socketio.Client(reconnection=True, reconnection_attempts=0)
 
@@ -172,17 +176,28 @@ sio = socketio.Client(reconnection=True, reconnection_attempts=0)
 def connect():
     print(f"[CONNECTED] to {SERVER_URL}")
     sio.emit('register_client', {'name': CLIENT_NAME})
-    if not hasattr(sio, '_metrics_started'):
-        sio._metrics_started = True
+
+    # Re‑attach any existing sessions so the server knows they are still alive
+    if sessions:
+        print(f"[REATTACH] sending {len(sessions)} active sessions")
+        for sid in list(sessions.keys()):
+            sio.emit('terminal_ready', {'session_id': sid})  # tell server they exist
+
+    # Start background threads once
+    if not hasattr(sio, '_background_started'):
+        sio._background_started = True
         threading.Thread(target=send_metrics, daemon=True).start()
+        threading.Thread(target=keep_alive_ping, daemon=True).start()
+
 
 @sio.event
 def disconnect():
     print("[DISCONNECTED] from server")
-    for sid in list(sessions.keys()):
-        _close_terminal(sid)
+    # DO NOT close terminals – keep them alive for when we reconnect
+    # for sid in list(sessions.keys()):
+    #     _close_terminal(sid)   # <-- REMOVED
 
-# FIX: event handler is now just a thin dispatcher — calls _spawn_terminal (not itself)
+
 @sio.event
 def spawn_terminal(data):
     session_id = data.get('session_id')
@@ -193,6 +208,7 @@ def spawn_terminal(data):
         sio.emit('terminal_ready', {'session_id': session_id})
     else:
         sio.emit('terminal_error', {'session_id': session_id, 'error': 'Failed to spawn shell'})
+
 
 @sio.event
 def terminal_input(data):
@@ -205,14 +221,16 @@ def terminal_input(data):
         except Exception as e:
             print(f"[WRITE ERROR] {session_id}: {e}")
 
+
 @sio.event
 def terminal_resize(data):
     _resize_terminal(data.get('session_id'), data.get('cols', 80), data.get('rows', 24))
 
-# FIX: event handler calls _close_terminal (not itself)
+
 @sio.event
 def close_terminal(data):
     _close_terminal(data.get('session_id'))
+
 
 @sio.event
 def ping():
@@ -222,16 +240,19 @@ def ping():
 
 # ---------- Entry point ----------
 if __name__ == '__main__':
-    try:
-        print(f"[INFO] Connecting to {SERVER_URL} as '{CLIENT_NAME}'")
-        sio.connect(SERVER_URL, wait_timeout=10)
-        print("[INFO] Client running. Press Ctrl+C to exit.")
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n[INFO] Exiting...")
-        sio.disconnect()
-        sys.exit(0)
-    except Exception as e:
-        print(f"[ERROR] {e}\n{traceback.format_exc()}")
-        sys.exit(1)
+    # Keep trying to connect forever, even if the server is down initially
+    while True:
+        try:
+            print(f"[INFO] Connecting to {SERVER_URL} as '{CLIENT_NAME}'")
+            sio.connect(SERVER_URL, wait_timeout=10)
+            print("[INFO] Client running. Press Ctrl+C to exit.")
+            sio.wait()  # blocks until disconnect
+            print("[INFO] Connection lost – reconnecting...")
+            time.sleep(5)  # wait a bit before retry
+        except KeyboardInterrupt:
+            print("\n[INFO] Exiting...")
+            sio.disconnect()
+            sys.exit(0)
+        except Exception as e:
+            print(f"[ERROR] {e}\n{traceback.format_exc()}")
+            time.sleep(5)  # wait before retry
