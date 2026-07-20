@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
+"""
+Remote terminal client – auto‑installs dependencies and connects to the server.
+"""
 import sys
 import subprocess
 import importlib
 
+# ---------- Auto‑install missing modules ----------
 def install(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
@@ -20,24 +24,58 @@ except ImportError:
     install("psutil")
     import psutil
 
-import os, time, threading, pty, select, struct, fcntl, termios, socket, traceback
+import os
+import time
+import threading
+import pty
+import select
+import struct
+import fcntl
+import termios
+import socket
+import traceback
 
-SERVER_URL = "https://livtrmnlasdasd.onrender.com"
+# ---------- Configuration ----------
+SERVER_URL = "https://livtrmnlasdasd.onrender.com"   # <-- your Render URL
 CLIENT_NAME = socket.gethostname()
 
-sessions = {}
-output_threads = {}
+# ---------- Terminal session management ----------
+sessions = {}           # session_id -> {'process', 'master_fd', 'slave_fd', 'pid'}
+output_threads = {}     # session_id -> thread
 
 def spawn_terminal(session_id, cols=80, rows=24):
+    """Spawn a bash shell with a PTY and force a prompt."""
     master_fd, slave_fd = pty.openpty()
+    # Set window size
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+
+    # Set environment for better terminal compatibility
+    env = os.environ.copy()
+    env['TERM'] = 'xterm-256color'
+    env['PS1'] = '\\[\\033[01;32m\\]\\u@\\h\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ '
+
     process = subprocess.Popen(
         ['/bin/bash', '-i'],
-        stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-        preexec_fn=os.setsid, close_fds=True
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        preexec_fn=os.setsid,
+        close_fds=True,
+        env=env
     )
-    sessions[session_id] = {'process': process, 'master_fd': master_fd, 'slave_fd': slave_fd, 'pid': process.pid}
+    sessions[session_id] = {
+        'process': process,
+        'master_fd': master_fd,
+        'slave_fd': slave_fd,
+        'pid': process.pid
+    }
+
+    # Force a newline to make the shell print its prompt
+    time.sleep(0.5)
+    os.write(master_fd, b'\n')
+
+    # Start a thread to read output
     def read_output():
         while session_id in sessions:
             try:
@@ -46,20 +84,29 @@ def spawn_terminal(session_id, cols=80, rows=24):
                     data = os.read(master_fd, 1024)
                     if data:
                         if sio.connected:
-                            sio.emit('terminal_output', {'session_id': session_id, 'output': data.decode('utf-8', errors='replace')})
+                            sio.emit('terminal_output', {
+                                'session_id': session_id,
+                                'output': data.decode('utf-8', errors='replace')
+                            })
                     else:
                         break
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                print(f"read_output error: {e}")
                 break
+        # Clean up if process ended
         if session_id in sessions:
             sessions[session_id]['process'].terminate()
             del sessions[session_id]
+            print(f"Terminal {session_id} cleaned up")
+
     thread = threading.Thread(target=read_output, daemon=True)
     thread.start()
     output_threads[session_id] = thread
+    print(f"Terminal {session_id} spawned with PID {process.pid}")
     return session_id
 
 def close_terminal(session_id):
+    """Terminate and clean up a terminal session."""
     if session_id in sessions:
         proc = sessions[session_id]['process']
         proc.terminate()
@@ -73,18 +120,25 @@ def close_terminal(session_id):
             del output_threads[session_id]
 
 def resize_terminal(session_id, cols, rows):
+    """Resize the PTY window."""
     if session_id in sessions:
         master_fd = sessions[session_id]['master_fd']
         winsize = struct.pack("HHHH", rows, cols, 0, 0)
         fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
+# ---------- Metrics collection ----------
 def get_metrics():
     cpu = psutil.cpu_percent(interval=0.5)
     ram = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
     net = psutil.net_io_counters()
     net_speed = f"{net.bytes_sent//1024} KB/s ↑ {net.bytes_recv//1024} KB/s ↓"
-    return {'cpu': cpu, 'ram_percent': ram.percent, 'disk_percent': disk.percent, 'net_speed': net_speed}
+    return {
+        'cpu': cpu,
+        'ram_percent': ram.percent,
+        'disk_percent': disk.percent,
+        'net_speed': net_speed
+    }
 
 def send_metrics():
     while True:
@@ -97,7 +151,13 @@ def send_metrics():
             print(f"Metrics error: {e}")
         time.sleep(2)
 
-sio = socketio.Client(reconnection=True, reconnection_attempts=0)
+# ---------- Socket.IO client ----------
+sio = socketio.Client(
+    reconnection=True,
+    reconnection_attempts=0,
+    reconnection_delay=1,
+    reconnection_delay_max=5
+)
 
 @sio.event
 def connect():
@@ -126,24 +186,30 @@ def terminal_input(data):
     session_id = data.get('session_id')
     input_data = data.get('data')
     if session_id in sessions:
+        master_fd = sessions[session_id]['master_fd']
         try:
-            os.write(sessions[session_id]['master_fd'], input_data.encode())
+            os.write(master_fd, input_data.encode())
         except Exception as e:
             print(f"Write error: {e}")
 
 @sio.event
 def terminal_resize(data):
-    resize_terminal(data.get('session_id'), data.get('cols'), data.get('rows'))
+    session_id = data.get('session_id')
+    cols = data.get('cols')
+    rows = data.get('rows')
+    resize_terminal(session_id, cols, rows)
 
 @sio.event
 def close_terminal(data):
-    close_terminal(data.get('session_id'))
+    session_id = data.get('session_id')
+    close_terminal(session_id)
 
 @sio.event
 def ping():
     if sio.connected:
         sio.emit('pong')
 
+# ---------- Main ----------
 if __name__ == '__main__':
     try:
         sio.connect(SERVER_URL, wait_timeout=10)
