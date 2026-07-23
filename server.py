@@ -22,7 +22,6 @@ HTML_PAGE = r"""
     <title>Remote Terminal</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- use compatible xterm and addon versions -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@4.18.0/css/xterm.css">
     <script src="https://cdn.jsdelivr.net/npm/xterm@4.18.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.5.0/lib/xterm-addon-fit.js"></script>
@@ -99,6 +98,7 @@ HTML_PAGE = r"""
                 <div class="terminal-panel" id="terminal-panel">
                     <div class="terminal-tabs" id="term-tab-bar">
                         <button id="new-terminal-btn" class="term-tab"><i class="fas fa-plus"></i> New</button>
+                        <button id="refresh-terminal-btn" class="term-tab" title="Restart current terminal"><i class="fas fa-sync-alt"></i> Refresh</button>
                         <button id="fullscreen-btn" class="fullscreen-btn" title="Fullscreen"><i class="fas fa-expand"></i></button>
                     </div>
                     <div id="terminal-container"></div>
@@ -147,13 +147,12 @@ function selectClient(sid) {
     document.querySelector(`.client-card[data-sid="${sid}"]`)?.classList.add('active');
     document.getElementById('no-client').style.display = 'none';
     document.getElementById('client-dashboard').style.display = 'block';
-    // Clean old terminals
     Object.values(terminals).forEach(t => t.dispose());
     terminals = {};
     terminalSessions = {};
     document.getElementById('terminal-container').innerHTML = '';
     const tabBar = document.getElementById('term-tab-bar');
-    while (tabBar.children.length > 2) tabBar.removeChild(tabBar.lastChild);
+    while (tabBar.children.length > 3) tabBar.removeChild(tabBar.lastChild); // keep New, Refresh, Fullscreen
     document.getElementById('process-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center; padding:2rem;">Click Refresh to load</td></tr>';
     switchMainTab('terminal');
     document.querySelectorAll('.tab-btn[data-tab="terminal"]')[0].classList.add('active');
@@ -199,7 +198,9 @@ function createNewTerminal() {
         tab.innerHTML = `Term ${Object.keys(terminals).length + 1} <span class="close-term" data-session="${sessionId}">×</span>`;
         tab.addEventListener('click', (e) => { if (!e.target.classList.contains('close-term')) switchTerminal(sessionId); });
         tab.querySelector('.close-term').addEventListener('click', (e) => { e.stopPropagation(); closeTerminal(sessionId); });
-        tabBar.insertBefore(tab, fullscreenBtn);
+        // Insert before the Refresh button
+        const refreshBtn = document.getElementById('refresh-terminal-btn');
+        tabBar.insertBefore(tab, refreshBtn);
 
         const termDiv = document.createElement('div');
         termDiv.id = `term-${sessionId}`;
@@ -229,7 +230,8 @@ function switchTerminal(sessionId) {
     document.querySelectorAll('.term-tab').forEach(b => b.classList.remove('active'));
     document.querySelector(`.term-tab[data-session="${sessionId}"]`)?.classList.add('active');
     document.querySelectorAll('#terminal-container > div').forEach(d => d.style.display = 'none');
-    document.getElementById(`term-${sessionId}`).style.display = 'block';
+    const target = document.getElementById(`term-${sessionId}`);
+    if (target) target.style.display = 'block';
 }
 
 function closeTerminal(sessionId) {
@@ -242,6 +244,19 @@ function closeTerminal(sessionId) {
     if (Object.keys(terminals).length === 0) createNewTerminal();
     else switchTerminal(Object.keys(terminals)[0]);
 }
+
+// Refresh button: restart the active terminal
+document.getElementById('refresh-terminal-btn').addEventListener('click', () => {
+    const activeTab = document.querySelector('.term-tab.active');
+    if (activeTab) {
+        const sessionId = activeTab.dataset.session;
+        closeTerminal(sessionId);  // this will spawn a new one
+    } else if (currentClient) {
+        createNewTerminal();
+    }
+});
+
+document.getElementById('new-terminal-btn').addEventListener('click', createNewTerminal);
 
 function updateMetricsUI(metrics) {
     const grid = document.getElementById('metrics-grid');
@@ -291,7 +306,6 @@ function renderProcessTable(procs) {
 document.getElementById('refresh-processes-btn')?.addEventListener('click', () => {
     if (currentClient) socket.emit('get_processes', currentClient);
 });
-document.getElementById('new-terminal-btn').addEventListener('click', createNewTerminal);
 
 socket.on('connect', () => console.log('Connected'));
 socket.on('client_list', renderClientList);
