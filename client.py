@@ -1,88 +1,54 @@
 #!/usr/bin/env python3
-import sys
-import subprocess
+import sys, subprocess, os, time, threading, select, struct, fcntl, termios, socket, traceback, platform
 
-def install(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+def install(pkg):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
 
 try:
     import socketio
 except ImportError:
-    print("Installing python-socketio...")
     install("python-socketio")
     import socketio
-
 try:
     import psutil
 except ImportError:
-    print("Installing psutil...")
     install("psutil")
     import psutil
 
-import os, time, threading, select, struct, fcntl, termios, socket, traceback, platform
-
-SERVER_URL = "https://livtrmnlasdasd-ey03.onrender.com"
+SERVER_URL = "https://livtrmnlasdasd-ey03.onrender.com"   # your actual Render URL
 CLIENT_NAME = socket.gethostname()
-
-sessions = {}        # session_id -> {'process', 'master_fd' (or 'stdout'), 'pid', 'is_windows'}
-output_threads = {}  # session_id -> Thread
-
 IS_WINDOWS = platform.system() == 'Windows'
 
-# ---------- Spawn shell (cross-platform) ----------
+sessions = {}
+output_threads = {}
+_net_prev = None
+_net_prev_time = None
+
+# --- Shell spawning ---
 def _spawn_terminal(session_id, cols=80, rows=24):
     try:
         env = os.environ.copy()
         env['TERM'] = 'xterm-256color' if not IS_WINDOWS else ''
-        env['PS1'] = r'\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
-
         if IS_WINDOWS:
             # Windows: use cmd.exe with pipes
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            process = subprocess.Popen(
-                'cmd.exe',
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                startupinfo=startupinfo,
-                env=env,
-                bufsize=0,
-                universal_newlines=False
-            )
-            sessions[session_id] = {
-                'process': process,
-                'stdin': process.stdin,
-                'stdout': process.stdout,
-                'pid': process.pid,
-                'is_windows': True
-            }
-            # send a newline to get initial prompt
-            process.stdin.write(b'\r\n')
-            process.stdin.flush()
+            proc = subprocess.Popen('cmd.exe', stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, startupinfo=startupinfo, env=env, bufsize=0)
+            sessions[session_id] = {'process': proc, 'stdin': proc.stdin, 'stdout': proc.stdout,
+                                    'pid': proc.pid, 'is_windows': True}
+            proc.stdin.write(b'\r\n')
+            proc.stdin.flush()
         else:
-            # Unix: use PTY
             import pty
             master_fd, slave_fd = pty.openpty()
             winsize = struct.pack("HHHH", rows, cols, 0, 0)
             fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
             shell = '/bin/bash' if os.path.exists('/bin/bash') else '/bin/sh'
-            process = subprocess.Popen(
-                [shell, '-i'],
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                preexec_fn=os.setsid,
-                close_fds=True,
-                env=env
-            )
+            proc = subprocess.Popen([shell, '-i'], stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                                    preexec_fn=os.setsid, close_fds=True, env=env)
             os.close(slave_fd)
-            sessions[session_id] = {
-                'process': process,
-                'master_fd': master_fd,
-                'pid': process.pid,
-                'is_windows': False
-            }
+            sessions[session_id] = {'process': proc, 'master_fd': master_fd, 'pid': proc.pid, 'is_windows': False}
             time.sleep(0.3)
             os.write(master_fd, b'\n')
 
@@ -91,196 +57,123 @@ def _spawn_terminal(session_id, cols=80, rows=24):
             while session_id in sessions:
                 try:
                     if sess['is_windows']:
-                        # Windows: read from stdout pipe
                         chunk = sess['stdout'].read(4096)
-                        if not chunk:
-                            break
+                        if not chunk: break
                     else:
-                        # Unix: read from PTY
                         r, _, _ = select.select([sess['master_fd']], [], [], 0.1)
                         if sess['master_fd'] in r:
-                            try:
-                                chunk = os.read(sess['master_fd'], 4096)
-                            except OSError:
-                                break
+                            chunk = os.read(sess['master_fd'], 4096)
                         else:
                             continue
-                    if chunk:
-                        if sio.connected:
-                            sio.emit('terminal_output', {
-                                'session_id': session_id,
-                                'output': chunk.decode('utf-8', errors='replace')
-                            })
-                    else:
+                    if chunk and sio.connected:
+                        sio.emit('terminal_output', {'session_id': session_id, 'output': chunk.decode('utf-8', errors='replace')})
+                    if sess['process'].poll() is not None:
                         break
-                    if session_id in sessions and sessions[session_id]['process'].poll() is not None:
-                        break
-                except Exception as e:
-                    print(f"[READ ERROR] {session_id}: {e}")
-                    break
-            # Cleanup if process died
-            if session_id in sessions:
-                try:
-                    sessions[session_id]['process'].terminate()
                 except:
-                    pass
+                    break
+            if session_id in sessions:
+                try: sessions[session_id]['process'].terminate()
+                except: pass
                 sessions.pop(session_id, None)
                 output_threads.pop(session_id, None)
-                print(f"[CLEANUP] {session_id} removed (process died)")
 
         t = threading.Thread(target=read_output, daemon=True)
         t.start()
         output_threads[session_id] = t
-        print(f"[SPAWN] {session_id}  PID={process.pid}  (Windows={IS_WINDOWS})")
+        print(f"[SPAWN] {session_id}  PID={proc.pid}")
         return session_id
-
     except Exception as e:
         print(f"[SPAWN ERROR] {e}\n{traceback.format_exc()}")
         return None
 
-
 def _close_terminal(session_id):
     sess = sessions.pop(session_id, None)
-    if not sess:
-        return
+    if not sess: return
     try:
         sess['process'].terminate()
         time.sleep(0.1)
-        if sess['process'].poll() is None:
-            sess['process'].kill()
-        if not sess.get('is_windows'):
-            os.close(sess['master_fd'])
-    except Exception as e:
-        print(f"[CLOSE ERROR] {session_id}: {e}")
+        if sess['process'].poll() is None: sess['process'].kill()
+        if not sess.get('is_windows'): os.close(sess['master_fd'])
+    except: pass
     output_threads.pop(session_id, None)
-    print(f"[CLOSED] {session_id}")
-
 
 def _resize_terminal(session_id, cols, rows):
     sess = sessions.get(session_id)
-    if not sess or sess.get('is_windows'):
-        return  # Windows pipes can't be resized easily
+    if not sess or sess.get('is_windows'): return
     try:
         winsize = struct.pack("HHHH", rows, cols, 0, 0)
         fcntl.ioctl(sess['master_fd'], termios.TIOCSWINSZ, winsize)
     except Exception as e:
-        print(f"[RESIZE ERROR] {session_id}: {e}")
+        print(f"[RESIZE ERROR] {e}")
 
-
-# ---------- Enhanced Metrics ----------
-_net_prev = None
-_net_prev_time = None
-
+# --- Metrics ---
 def get_network_speed():
     global _net_prev, _net_prev_time
-    current = psutil.net_io_counters()
+    cur = psutil.net_io_counters()
     now = time.time()
-    if _net_prev is None or _net_prev_time is None:
-        _net_prev = current
-        _net_prev_time = now
+    if _net_prev is None:
+        _net_prev, _net_prev_time = cur, now
         return "0 B/s", "0 B/s"
     dt = now - _net_prev_time
-    if dt == 0:
-        return "0 B/s", "0 B/s"
-    down_bytes = current.bytes_recv - _net_prev.bytes_recv
-    up_bytes = current.bytes_sent - _net_prev.bytes_sent
-    _net_prev = current
-    _net_prev_time = now
+    if dt == 0: return "0 B/s", "0 B/s"
+    down = (cur.bytes_recv - _net_prev.bytes_recv) / dt
+    up = (cur.bytes_sent - _net_prev.bytes_sent) / dt
+    _net_prev, _net_prev_time = cur, now
     def fmt(b):
-        if b >= 1024*1024:
-            return f"{b/(1024*1024):.1f} MB/s"
-        elif b >= 1024:
-            return f"{b/1024:.1f} KB/s"
-        else:
-            return f"{b:.0f} B/s"
-    return fmt(down_bytes), fmt(up_bytes)
-
-def get_cpu_model():
-    if IS_WINDOWS:
-        return platform.processor() or "Unknown"
-    try:
-        with open("/proc/cpuinfo") as f:
-            for line in f:
-                if "model name" in line:
-                    return line.split(":")[1].strip()
-    except:
-        pass
-    return platform.processor() or "Unknown"
+        if b >= 1e6: return f"{b/1e6:.1f} MB/s"
+        if b >= 1e3: return f"{b/1e3:.1f} KB/s"
+        return f"{b:.0f} B/s"
+    return fmt(down), fmt(up)
 
 def get_metrics():
     cpu = psutil.cpu_percent(interval=0.5)
     ram = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
-    down_speed, up_speed = get_network_speed()
-    cpu_cores = psutil.cpu_count(logical=True)
-    cpu_model = get_cpu_model()
-    total_ram = f"{ram.total / (1024**3):.1f} GB"
-    used_ram = f"{ram.used / (1024**3):.1f} GB"
-    available_ram = f"{ram.available / (1024**3):.1f} GB"
-    disk_total = f"{disk.total / (1024**3):.1f} GB"
-    disk_used = f"{disk.used / (1024**3):.1f} GB"
+    down, up = get_network_speed()
+    cpu_model = platform.processor() or "Unknown"
+    if not IS_WINDOWS:
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if "model name" in line: cpu_model = line.split(":")[1].strip(); break
+        except: pass
     return {
-        'cpu': cpu,
-        'cpu_cores': cpu_cores,
-        'cpu_model': cpu_model,
-        'ram_percent': ram.percent,
-        'total_ram': total_ram,
-        'used_ram': used_ram,
-        'available_ram': available_ram,
-        'disk_percent': disk.percent,
-        'disk_total': disk_total,
-        'disk_used': disk_used,
-        'net_speed': f"{down_speed} ↓ {up_speed} ↑",
-        'net_down': down_speed,
-        'net_up': up_speed,
+        'cpu': cpu, 'cpu_cores': psutil.cpu_count(logical=True), 'cpu_model': cpu_model,
+        'ram_percent': ram.percent, 'total_ram': f"{ram.total/1e9:.1f} GB",
+        'used_ram': f"{ram.used/1e9:.1f} GB", 'available_ram': f"{ram.available/1e9:.1f} GB",
+        'disk_percent': disk.percent, 'disk_total': f"{disk.total/1e9:.1f} GB",
+        'disk_used': f"{disk.used/1e9:.1f} GB",
+        'net_speed': f"{down} ↓ {up} ↑", 'net_down': down, 'net_up': up
     }
 
 def send_metrics():
     while True:
-        try:
-            if sio.connected:
-                sio.emit('metrics', {'metrics': get_metrics()})
-        except Exception as e:
-            print(f"[METRICS ERROR] {e}")
+        if sio.connected:
+            try: sio.emit('metrics', {'metrics': get_metrics()})
+            except: pass
         time.sleep(2)
 
 def keep_alive_ping():
     while True:
         time.sleep(30)
         if sio.connected:
-            try:
-                sio.emit('ping')
-            except:
-                pass
+            try: sio.emit('ping')
+            except: pass
 
 def list_processes():
     procs = []
-    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
-        try:
-            info = proc.info
-            procs.append({
-                'pid': info['pid'],
-                'name': info['name'],
-                'cpu_percent': info['cpu_percent'] or 0.0,
-                'mem_percent': info['memory_percent'] or 0.0,
-            })
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
+    for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
+        try: procs.append({'pid': p.info['pid'], 'name': p.info['name'],
+                           'cpu_percent': p.info['cpu_percent'] or 0, 'mem_percent': p.info['memory_percent'] or 0})
+        except: pass
     procs.sort(key=lambda x: x['cpu_percent'], reverse=True)
     return procs
 
 def kill_process(pid):
-    try:
-        p = psutil.Process(pid)
-        p.kill()
-        print(f"[KILL] Process {pid} killed")
-        return True
-    except Exception as e:
-        print(f"[KILL ERROR] PID {pid}: {e}")
-        return False
+    try: psutil.Process(pid).kill(); return True
+    except: return False
 
-
-# ---------- Socket.IO ----------
+# --- SocketIO ---
 sio = socketio.Client(reconnection=True, reconnection_attempts=0)
 
 @sio.event
@@ -288,44 +181,34 @@ def connect():
     print(f"[CONNECTED] to {SERVER_URL}")
     sio.emit('register_client', {'name': CLIENT_NAME})
     if sessions:
-        print(f"[REATTACH] sending {len(sessions)} active sessions")
-        for sid in list(sessions.keys()):
-            sio.emit('terminal_ready', {'session_id': sid})
-    if not hasattr(sio, '_background_started'):
-        sio._background_started = True
+        for sid in sessions: sio.emit('terminal_ready', {'session_id': sid})
+    if not hasattr(sio, '_bg_started'):
+        sio._bg_started = True
         threading.Thread(target=send_metrics, daemon=True).start()
         threading.Thread(target=keep_alive_ping, daemon=True).start()
 
 @sio.event
 def disconnect():
-    print("[DISCONNECTED] from server")
+    print("[DISCONNECTED]")
 
 @sio.event
 def spawn_terminal(data):
-    session_id = data.get('session_id')
-    if not session_id or session_id in sessions:
-        return
-    result = _spawn_terminal(session_id)
-    if result:
-        sio.emit('terminal_ready', {'session_id': session_id})
-    else:
-        sio.emit('terminal_error', {'session_id': session_id, 'error': 'Failed to spawn shell'})
+    sid = data.get('session_id')
+    if sid and sid not in sessions:
+        if _spawn_terminal(sid): sio.emit('terminal_ready', {'session_id': sid})
+        else: sio.emit('terminal_error', {'session_id': sid, 'error': 'spawn failed'})
 
 @sio.event
 def terminal_input(data):
-    session_id = data.get('session_id')
-    input_data = data.get('data')
-    sess = sessions.get(session_id)
-    if sess and input_data:
+    sess = sessions.get(data.get('session_id'))
+    if sess and data.get('data'):
         try:
             if sess.get('is_windows'):
-                # Windows: write to stdin pipe
-                sess['stdin'].write(input_data.encode())
+                sess['stdin'].write(data['data'].encode())
                 sess['stdin'].flush()
             else:
-                os.write(sess['master_fd'], input_data.encode())
-        except Exception as e:
-            print(f"[WRITE ERROR] {session_id}: {e}")
+                os.write(sess['master_fd'], data['data'].encode())
+        except: pass
 
 @sio.event
 def terminal_resize(data):
@@ -338,37 +221,26 @@ def close_terminal(data):
 @sio.event
 def list_processes():
     if sio.connected:
-        try:
-            procs = list_processes()
-            sio.emit('process_list', {'processes': procs})
-        except Exception as e:
-            print(f"[PROC LIST ERROR] {e}")
-            sio.emit('process_list', {'processes': []})
+        try: sio.emit('process_list', {'processes': list_processes()})
+        except: sio.emit('process_list', {'processes': []})
 
 @sio.event
 def kill_process(data):
     pid = data.get('pid')
-    if pid is not None:
-        kill_process(pid)
+    if pid: kill_process(pid)
 
 @sio.event
 def ping():
-    if sio.connected:
-        sio.emit('pong')
+    if sio.connected: sio.emit('pong')
 
 if __name__ == '__main__':
     while True:
         try:
             print(f"[INFO] Connecting to {SERVER_URL} as '{CLIENT_NAME}'")
             sio.connect(SERVER_URL, wait_timeout=10)
-            print("[INFO] Client running. Press Ctrl+C to exit.")
             sio.wait()
-            print("[INFO] Connection lost – reconnecting...")
-            time.sleep(5)
         except KeyboardInterrupt:
-            print("\n[INFO] Exiting...")
-            sio.disconnect()
-            sys.exit(0)
-        except Exception as e:
-            print(f"[ERROR] {e}\n{traceback.format_exc()}")
+            sio.disconnect(); sys.exit(0)
+        except:
+            traceback.print_exc()
             time.sleep(5)
