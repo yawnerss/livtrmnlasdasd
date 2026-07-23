@@ -142,11 +142,25 @@ function renderClientList(clients) {
 }
 
 function selectClient(sid) {
+    // If same client is already active, just show the existing terminal (do nothing destructive)
+    if (sid === currentClient) {
+        // If there are no terminals yet, create one
+        if (Object.keys(terminals).length === 0) {
+            createNewTerminal();
+        } else {
+            // Otherwise just switch to the first existing terminal
+            switchTerminal(Object.keys(terminals)[0]);
+        }
+        return;
+    }
+
+    // Different client selected: clean up old terminals and prepare new dashboard
     currentClient = sid;
     document.querySelectorAll('.client-card').forEach(c => c.classList.remove('active'));
     document.querySelector(`.client-card[data-sid="${sid}"]`)?.classList.add('active');
     document.getElementById('no-client').style.display = 'none';
     document.getElementById('client-dashboard').style.display = 'block';
+    // Dispose all existing terminals
     Object.values(terminals).forEach(t => t.dispose());
     terminals = {};
     terminalSessions = {};
@@ -198,7 +212,6 @@ function createNewTerminal() {
         tab.innerHTML = `Term ${Object.keys(terminals).length + 1} <span class="close-term" data-session="${sessionId}">×</span>`;
         tab.addEventListener('click', (e) => { if (!e.target.classList.contains('close-term')) switchTerminal(sessionId); });
         tab.querySelector('.close-term').addEventListener('click', (e) => { e.stopPropagation(); closeTerminal(sessionId); });
-        // Insert before the Refresh button
         const refreshBtn = document.getElementById('refresh-terminal-btn');
         tabBar.insertBefore(tab, refreshBtn);
 
@@ -329,7 +342,7 @@ def broadcast_client_list():
         for sid, info in clients.items()
     }, broadcast=True)
 
-# SocketIO events
+# SocketIO events (exactly as before)
 @socketio.on('connect')
 def handle_connect(auth=None):
     print(f"[+] Connected: {request.sid}")
