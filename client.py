@@ -15,7 +15,7 @@ except ImportError:
     install("psutil")
     import psutil
 
-SERVER_URL = "https://livtrmnlasdasd-ey03.onrender.com"   # your actual Render URL
+SERVER_URL = "https://livtrmnlasdasd-ey03.onrender.com"   # <-- your actual Render URL
 CLIENT_NAME = socket.gethostname()
 IS_WINDOWS = platform.system() == 'Windows'
 
@@ -51,6 +51,9 @@ def _spawn_terminal(session_id, cols=80, rows=24):
             sessions[session_id] = {'process': proc, 'master_fd': master_fd, 'pid': proc.pid, 'is_windows': False}
             time.sleep(0.3)
             os.write(master_fd, b'\n')
+
+        # 🔥 FIX: wait for the browser to build the terminal before sending output
+        time.sleep(1.0)
 
         def read_output():
             sess = sessions[session_id]
