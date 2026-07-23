@@ -6,7 +6,9 @@ from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'change-this-secret-key-in-production'
-socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25)
+
+# Use gevent for production – no distutils dependency
+socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25, async_mode='gevent')
 
 clients = {}
 terminal_sessions = {}
@@ -24,7 +26,7 @@ HTML_PAGE = """
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
     <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
-    <!-- FIX: use a version that exposes global FitAddon -->
+    <!-- Pinned version that exposes global FitAddon -->
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.5.0/lib/xterm-addon-fit.js"></script>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -754,7 +756,6 @@ def handle_ping():
     emit('pong')
 
 if __name__ == '__main__':
-    import eventlet
-    import eventlet.wsgi
     port = int(os.environ.get('PORT', 5000))
-    eventlet.wsgi.server(eventlet.listen(('0.0.0.0', port)), app)
+    # Gevent takes care of production WSGI, no need for allow_unsafe_werkzeug
+    socketio.run(app, host='0.0.0.0', port=port, debug=False)
