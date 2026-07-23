@@ -8,16 +8,11 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'change-this-secret-key-in-production'
 socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25)
 
-# sid -> {'name': str, 'metrics': dict}
 clients = {}
-# client_sid -> {session_id: {'created': True}}
 terminal_sessions = {}
-# session_id -> client_sid  (which remote machine owns this session)
 session_owners = {}
-# client_sid -> browser_sid  (which browser is currently watching this client)
 client_watchers = {}
 
-# ---------- Embedded Modern UI with Fullscreen Terminal ----------
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -29,7 +24,8 @@ HTML_PAGE = """
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
     <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+    <!-- FIX: use a version that exposes global FitAddon -->
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.5.0/lib/xterm-addon-fit.js"></script>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
@@ -315,33 +311,24 @@ HTML_PAGE = """
     </style>
 </head>
 <body>
-    <!-- Sidebar -->
     <div class="sidebar" id="sidebar">
         <h5><i class="fas fa-terminal"></i> Clients</h5>
         <div id="client-list"></div>
     </div>
-
-    <!-- Main Panel -->
     <div class="main-panel">
         <div id="no-client">
             <i class="fas fa-plug fa-3x"></i>
             <p class="mt-3">Select a client to manage terminals & processes.</p>
         </div>
-
         <div id="client-dashboard" style="display: none;">
-            <!-- Metrics -->
             <div class="dashboard-header">
                 <div class="metrics-grid" id="metrics-grid"></div>
             </div>
-
-            <!-- Tabs: Terminals / Processes -->
             <div class="content-area">
                 <div class="tab-nav">
                     <button class="tab-btn active" data-tab="terminal">Terminals</button>
                     <button class="tab-btn" data-tab="processes">Processes</button>
                 </div>
-
-                <!-- Terminal tab content -->
                 <div class="tab-content active" id="tab-terminal">
                     <div class="terminal-panel" id="terminal-panel">
                         <div class="terminal-tabs" id="term-tab-bar">
@@ -353,17 +340,13 @@ HTML_PAGE = """
                         <div id="terminal-container"></div>
                     </div>
                 </div>
-
-                <!-- Processes tab content -->
                 <div class="tab-content" id="tab-processes">
                     <div style="padding: 1rem;">
                         <button id="refresh-processes-btn" class="refresh-btn"><i class="fas fa-sync-alt"></i> Refresh</button>
                     </div>
                     <div class="process-panel">
                         <table class="process-table">
-                            <thead>
-                                <tr><th>PID</th><th>Name</th><th>CPU%</th><th>MEM%</th><th>Action</th></tr>
-                            </thead>
+                            <thead><tr><th>PID</th><th>Name</th><th>CPU%</th><th>MEM%</th><th>Action</th></tr></thead>
                             <tbody id="process-tbody">
                                 <tr><td colspan="5" style="text-align:center; padding:2rem;">Click Refresh to load processes</td></tr>
                             </tbody>
@@ -376,13 +359,11 @@ HTML_PAGE = """
 
 <script>
 const socket = io();
-
 let currentClient = null;
 let terminals = {};
 let terminalSessions = {};
 let currentTermTab = null;
 
-// ---------- Sidebar ----------
 function renderClientList(clients) {
     const container = document.getElementById('client-list');
     container.innerHTML = '';
@@ -409,30 +390,20 @@ function selectClient(sid) {
     document.querySelector(`.client-card[data-sid="${sid}"]`)?.classList.add('active');
     document.getElementById('no-client').style.display = 'none';
     document.getElementById('client-dashboard').style.display = 'block';
-
-    // Dispose old terminals
     for (const [sessId, term] of Object.entries(terminals)) term.dispose();
     terminals = {};
     terminalSessions = {};
     document.getElementById('terminal-container').innerHTML = '';
     const tabBar = document.getElementById('term-tab-bar');
-    // Remove all term tabs except the New button and fullscreen button
     while (tabBar.children.length > 2) tabBar.removeChild(tabBar.lastChild);
     currentTermTab = null;
-
-    // Clear process table
     document.getElementById('process-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center; padding:2rem;">Click Refresh to load processes</td></tr>';
-
-    // Reset tabs to Terminal
     switchMainTab('terminal');
     document.querySelectorAll('.tab-btn[data-tab="terminal"]')[0].classList.add('active');
-
-    // Request fresh metrics
     socket.emit('request_metrics', sid);
     createNewTerminal();
 }
 
-// ---------- Main Tabs ----------
 function switchMainTab(tabName) {
     document.querySelectorAll('.tab-btn[data-tab]').forEach(btn => btn.classList.remove('active'));
     document.querySelector(`.tab-btn[data-tab="${tabName}"]`)?.classList.add('active');
@@ -449,15 +420,12 @@ document.querySelectorAll('.tab-btn[data-tab]').forEach(btn => {
     });
 });
 
-// ---------- Fullscreen Logic ----------
 const fullscreenBtn = document.getElementById('fullscreen-btn');
 const terminalPanel = document.getElementById('terminal-panel');
 
 function toggleFullscreen() {
     if (!document.fullscreenElement) {
-        terminalPanel.requestFullscreen().catch(err => {
-            console.warn('Fullscreen request failed:', err);
-        });
+        terminalPanel.requestFullscreen().catch(err => console.warn('Fullscreen request failed:', err));
     } else {
         document.exitFullscreen();
     }
@@ -474,13 +442,11 @@ document.addEventListener('fullscreenchange', () => {
         icon.classList.remove('fa-compress');
         icon.classList.add('fa-expand');
     }
-    // Trigger resize for active terminal
     Object.values(terminals).forEach(term => {
         if (term && term._addon) term._addon.fit();
     });
 });
 
-// ---------- Terminal Handling ----------
 function createNewTerminal() {
     if (!currentClient) return;
     socket.emit('new_terminal', currentClient, (sessionId) => {
@@ -499,16 +465,13 @@ function createNewTerminal() {
             e.stopPropagation();
             closeTerminal(sessionId);
         });
-        // Insert tab before the fullscreen button
         tabBar.insertBefore(tab, fullscreenBtn);
-
         const container = document.getElementById('terminal-container');
         const termDiv = document.createElement('div');
         termDiv.id = `term-${sessionId}`;
         termDiv.style.display = 'none';
         termDiv.style.height = '100%';
         container.appendChild(termDiv);
-
         const term = new Terminal({
             cursorBlink: true,
             theme: { background: '#0a0e17', foreground: '#e0e6f0' }
@@ -516,18 +479,16 @@ function createNewTerminal() {
         term.open(termDiv);
         const fitAddon = new FitAddon.FitAddon();
         term.loadAddon(fitAddon);
-        term._addon = fitAddon;  // store reference for fullscreen resizing
+        term._addon = fitAddon;
         fitAddon.fit();
         terminals[sessionId] = term;
         terminalSessions[sessionId] = true;
-
         term.onResize((size) => {
             socket.emit('terminal_resize', { sessionId, cols: size.cols, rows: size.rows });
         });
         term.onData((data) => {
             socket.emit('terminal_input', { sessionId, data });
         });
-
         switchTerminal(sessionId);
         setTimeout(() => fitAddon.fit(), 100);
         const resizeObserver = new ResizeObserver(() => fitAddon.fit());
@@ -554,16 +515,12 @@ function closeTerminal(sessionId) {
     if (terminals[sessionId]) terminals[sessionId].dispose();
     delete terminals[sessionId];
     delete terminalSessions[sessionId];
-    if (Object.keys(terminals).length === 0) {
-        createNewTerminal();
-    } else {
-        switchTerminal(Object.keys(terminals)[0]);
-    }
+    if (Object.keys(terminals).length === 0) createNewTerminal();
+    else switchTerminal(Object.keys(terminals)[0]);
 }
 
 document.getElementById('new-terminal-btn').addEventListener('click', createNewTerminal);
 
-// ---------- Metrics Display ----------
 function updateMetricsUI(metrics) {
     const grid = document.getElementById('metrics-grid');
     const cpuCores = metrics.cpu_cores || 'N/A';
@@ -577,7 +534,6 @@ function updateMetricsUI(metrics) {
     const diskTotal = metrics.disk_total || 'N/A';
     const diskUsed = metrics.disk_used || '0';
     const diskPercent = metrics.disk_percent || 0;
-
     grid.innerHTML = `
         <div class="metric-card">
             <div class="metric-header"><span class="metric-icon"><i class="fas fa-microchip"></i></span><span class="metric-title">CPU</span></div>
@@ -605,7 +561,6 @@ function updateMetricsUI(metrics) {
     `;
 }
 
-// ---------- Process Table ----------
 function renderProcessTable(processes) {
     const tbody = document.getElementById('process-tbody');
     if (!processes || processes.length === 0) {
@@ -641,7 +596,6 @@ document.getElementById('refresh-processes-btn')?.addEventListener('click', () =
     if (currentClient) socket.emit('get_processes', currentClient);
 });
 
-// ---------- Socket Events ----------
 socket.on('connect', () => console.log('Connected'));
 socket.on('client_list', (data) => renderClientList(data));
 socket.on('metrics_update', (data) => {
@@ -651,30 +605,22 @@ socket.on('terminal_output', (data) => {
     if (terminals[data.sessionId]) terminals[data.sessionId].write(data.output);
 });
 socket.on('process_list', (data) => {
-    if (data.target_sid === currentClient) {
-        renderProcessTable(data.processes);
-    }
+    if (data.target_sid === currentClient) renderProcessTable(data.processes);
 });
-
-// Request initial client list
 socket.emit('get_clients');
 </script>
 </body>
 </html>
 """
 
-# ---------- Helper Functions (must be defined before use) ----------
+# ---------- Helpers ----------
 def broadcast_client_list():
     emit('client_list', {
         sid: {'name': info['name'], 'metrics': info['metrics']}
         for sid, info in clients.items()
     }, broadcast=True)
 
-# ---------- Flask routes and SocketIO handlers ----------
-@app.route('/')
-def index():
-    return render_template_string(HTML_PAGE)
-
+# ---------- SocketIO Events ----------
 @socketio.on('connect')
 def handle_connect(auth=None):
     print(f"[+] Connected: {request.sid}")
@@ -808,4 +754,5 @@ def handle_ping():
     emit('pong')
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    port = int(os.environ.get('PORT', 5000))
+    socketio.run(app, host='0.0.0.0', port=port, debug=False)
