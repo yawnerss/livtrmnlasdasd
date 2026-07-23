@@ -7,7 +7,7 @@ from flask_socketio import SocketIO, emit
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'change-this-secret-key-in-production'
 
-# Default threading mode – no extra dependencies needed
+# Default threading mode – no extra async dependencies
 socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25)
 
 clients = {}
@@ -15,7 +15,7 @@ terminal_sessions = {}
 session_owners = {}
 client_watchers = {}
 
-HTML_PAGE = """
+HTML_PAGE = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -615,6 +615,10 @@ socket.emit('get_clients');
 </html>
 """
 
+@app.route('/')
+def index():
+    return render_template_string(HTML_PAGE)
+
 # ---------- Helpers ----------
 def broadcast_client_list():
     emit('client_list', {
@@ -757,5 +761,5 @@ def handle_ping():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    # Default threading mode uses Werkzeug, but for Render we allow unsafe Werkzeug
+    # allow_unsafe_werkzeug is required when using the built‑in development server in production
     socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
