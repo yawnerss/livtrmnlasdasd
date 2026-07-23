@@ -20,6 +20,7 @@ except ImportError:
     import psutil
 
 import os, time, threading, pty, select, struct, fcntl, termios, socket, traceback
+import platform
 
 SERVER_URL = "https://live-terminal-ricardo-cum.onrender.com"
 CLIENT_NAME = socket.gethostname()
@@ -134,19 +135,75 @@ def _resize_terminal(session_id, cols, rows):
         print(f"[RESIZE ERROR] {session_id}: {e}")
 
 
+# ---------- Enhanced Metrics ----------
+_net_prev = None
+_net_prev_time = None
+
+def get_network_speed():
+    """Calculate download/upload speeds in MB/s or KB/s since last call."""
+    global _net_prev, _net_prev_time
+    current = psutil.net_io_counters()
+    now = time.time()
+    if _net_prev is None or _net_prev_time is None:
+        _net_prev = current
+        _net_prev_time = now
+        return "0 B/s", "0 B/s"
+    dt = now - _net_prev_time
+    if dt == 0:
+        return "0 B/s", "0 B/s"
+    down_bytes = current.bytes_recv - _net_prev.bytes_recv
+    up_bytes = current.bytes_sent - _net_prev.bytes_sent
+    _net_prev = current
+    _net_prev_time = now
+
+    def fmt(b):
+        if b >= 1024*1024:
+            return f"{b/(1024*1024):.1f} MB/s"
+        elif b >= 1024:
+            return f"{b/1024:.1f} KB/s"
+        else:
+            return f"{b:.0f} B/s"
+    return fmt(down_bytes), fmt(up_bytes)
+
+def get_cpu_model():
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if "model name" in line:
+                    return line.split(":")[1].strip()
+    except:
+        pass
+    return platform.processor() or "Unknown"
+
 def get_metrics():
     cpu = psutil.cpu_percent(interval=0.5)
     ram = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
-    net = psutil.net_io_counters()
-    net_speed = f"{net.bytes_sent // 1024} KB/s ↑ {net.bytes_recv // 1024} KB/s ↓"
+    down_speed, up_speed = get_network_speed()
+
+    cpu_cores = psutil.cpu_count(logical=True)
+    cpu_model = get_cpu_model()
+    total_ram = f"{ram.total / (1024**3):.1f} GB"
+    used_ram = f"{ram.used / (1024**3):.1f} GB"
+    available_ram = f"{ram.available / (1024**3):.1f} GB"
+    disk_total = f"{disk.total / (1024**3):.1f} GB"
+    disk_used = f"{disk.used / (1024**3):.1f} GB"
+
     return {
         'cpu': cpu,
+        'cpu_cores': cpu_cores,
+        'cpu_model': cpu_model,
         'ram_percent': ram.percent,
+        'total_ram': total_ram,
+        'used_ram': used_ram,
+        'available_ram': available_ram,
         'disk_percent': disk.percent,
-        'net_speed': net_speed,
+        'disk_total': disk_total,
+        'disk_used': disk_used,
+        'net_speed': f"{down_speed} ↓ {up_speed} ↑",  # for sidebar badge
+        'net_down': down_speed,
+        'net_up': up_speed,
     }
-
 
 def send_metrics():
     while True:
@@ -157,16 +214,44 @@ def send_metrics():
             print(f"[METRICS ERROR] {e}")
         time.sleep(2)
 
-
 def keep_alive_ping():
     """Send a ping every 30 seconds to keep the connection alive."""
     while True:
         time.sleep(30)
         if sio.connected:
             try:
-                sio.emit('ping')  # or 'pong' – server should respond accordingly
+                sio.emit('ping')
             except Exception:
                 pass
+
+# ---------- Process Management ----------
+def list_processes():
+    """Return a list of running processes with PID, name, CPU%, MEM%."""
+    procs = []
+    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
+        try:
+            info = proc.info
+            procs.append({
+                'pid': info['pid'],
+                'name': info['name'],
+                'cpu_percent': info['cpu_percent'] or 0.0,
+                'mem_percent': info['memory_percent'] or 0.0,
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    # Sort by CPU usage descending
+    procs.sort(key=lambda x: x['cpu_percent'], reverse=True)
+    return procs
+
+def kill_process(pid):
+    try:
+        p = psutil.Process(pid)
+        p.kill()
+        print(f"[KILL] Process {pid} killed")
+        return True
+    except Exception as e:
+        print(f"[KILL ERROR] PID {pid}: {e}")
+        return False
 
 
 # ---------- Socket.IO ----------
@@ -181,7 +266,7 @@ def connect():
     if sessions:
         print(f"[REATTACH] sending {len(sessions)} active sessions")
         for sid in list(sessions.keys()):
-            sio.emit('terminal_ready', {'session_id': sid})  # tell server they exist
+            sio.emit('terminal_ready', {'session_id': sid})
 
     # Start background threads once
     if not hasattr(sio, '_background_started'):
@@ -194,8 +279,6 @@ def connect():
 def disconnect():
     print("[DISCONNECTED] from server")
     # DO NOT close terminals – keep them alive for when we reconnect
-    # for sid in list(sessions.keys()):
-    #     _close_terminal(sid)   # <-- REMOVED
 
 
 @sio.event
@@ -232,6 +315,29 @@ def close_terminal(data):
     _close_terminal(data.get('session_id'))
 
 
+# ---------- NEW: Process Events ----------
+@sio.event
+def list_processes():
+    """Server requests process list."""
+    if sio.connected:
+        try:
+            procs = list_processes()
+            sio.emit('process_list', {'processes': procs})
+        except Exception as e:
+            print(f"[PROC LIST ERROR] {e}")
+            sio.emit('process_list', {'processes': []})
+
+
+@sio.event
+def kill_process(data):
+    """Server requests to kill a specific PID."""
+    pid = data.get('pid')
+    if pid is not None:
+        success = kill_process(pid)
+        # Optionally send back a status (not required, but useful)
+        # sio.emit('process_killed', {'pid': pid, 'success': success})
+
+
 @sio.event
 def ping():
     if sio.connected:
@@ -240,19 +346,18 @@ def ping():
 
 # ---------- Entry point ----------
 if __name__ == '__main__':
-    # Keep trying to connect forever, even if the server is down initially
     while True:
         try:
             print(f"[INFO] Connecting to {SERVER_URL} as '{CLIENT_NAME}'")
             sio.connect(SERVER_URL, wait_timeout=10)
             print("[INFO] Client running. Press Ctrl+C to exit.")
-            sio.wait()  # blocks until disconnect
+            sio.wait()
             print("[INFO] Connection lost – reconnecting...")
-            time.sleep(5)  # wait a bit before retry
+            time.sleep(5)
         except KeyboardInterrupt:
             print("\n[INFO] Exiting...")
             sio.disconnect()
             sys.exit(0)
         except Exception as e:
             print(f"[ERROR] {e}\n{traceback.format_exc()}")
-            time.sleep(5)  # wait before retry
+            time.sleep(5)
