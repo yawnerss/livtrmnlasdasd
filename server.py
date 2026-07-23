@@ -6,8 +6,6 @@ from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'change-this-secret-key-in-production'
-
-# Default threading mode – no extra async dependencies
 socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25)
 
 clients = {}
@@ -15,6 +13,7 @@ terminal_sessions = {}
 session_owners = {}
 client_watchers = {}
 
+# ---------- Embedded UI (with compatible xterm versions) ----------
 HTML_PAGE = r"""
 <!DOCTYPE html>
 <html lang="en">
@@ -24,9 +23,9 @@ HTML_PAGE = r"""
     <title>BlackHat Remote • Modern Terminal</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
-    <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
-    <!-- Pinned version that exposes global FitAddon -->
+    <!-- Pin compatible xterm & addon versions -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@4.18.0/css/xterm.css">
+    <script src="https://cdn.jsdelivr.net/npm/xterm@4.18.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.5.0/lib/xterm-addon-fit.js"></script>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -451,8 +450,13 @@ document.addEventListener('fullscreenchange', () => {
 
 function createNewTerminal() {
     if (!currentClient) return;
+    console.log('Requesting new terminal for', currentClient);
     socket.emit('new_terminal', currentClient, (sessionId) => {
-        if (!sessionId) return;
+        console.log('Got sessionId', sessionId);
+        if (!sessionId) {
+            console.error('No sessionId received');
+            return;
+        }
         const tabBar = document.getElementById('term-tab-bar');
         const tab = document.createElement('button');
         tab.className = 'term-tab';
@@ -474,27 +478,32 @@ function createNewTerminal() {
         termDiv.style.display = 'none';
         termDiv.style.height = '100%';
         container.appendChild(termDiv);
-        const term = new Terminal({
-            cursorBlink: true,
-            theme: { background: '#0a0e17', foreground: '#e0e6f0' }
-        });
-        term.open(termDiv);
-        const fitAddon = new FitAddon.FitAddon();
-        term.loadAddon(fitAddon);
-        term._addon = fitAddon;
-        fitAddon.fit();
-        terminals[sessionId] = term;
-        terminalSessions[sessionId] = true;
-        term.onResize((size) => {
-            socket.emit('terminal_resize', { sessionId, cols: size.cols, rows: size.rows });
-        });
-        term.onData((data) => {
-            socket.emit('terminal_input', { sessionId, data });
-        });
-        switchTerminal(sessionId);
-        setTimeout(() => fitAddon.fit(), 100);
-        const resizeObserver = new ResizeObserver(() => fitAddon.fit());
-        resizeObserver.observe(termDiv);
+        try {
+            const term = new Terminal({
+                cursorBlink: true,
+                theme: { background: '#0a0e17', foreground: '#e0e6f0' }
+            });
+            term.open(termDiv);
+            const fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            term._addon = fitAddon;
+            fitAddon.fit();
+            terminals[sessionId] = term;
+            terminalSessions[sessionId] = true;
+            term.onResize((size) => {
+                socket.emit('terminal_resize', { sessionId, cols: size.cols, rows: size.rows });
+            });
+            term.onData((data) => {
+                socket.emit('terminal_input', { sessionId, data });
+            });
+            switchTerminal(sessionId);
+            setTimeout(() => fitAddon.fit(), 100);
+            const resizeObserver = new ResizeObserver(() => fitAddon.fit());
+            resizeObserver.observe(termDiv);
+            console.log('Terminal created successfully');
+        } catch (e) {
+            console.error('Terminal creation error:', e);
+        }
     });
 }
 
@@ -761,5 +770,4 @@ def handle_ping():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    # allow_unsafe_werkzeug is required when using the built‑in development server in production
     socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
