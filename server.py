@@ -7,8 +7,8 @@ from flask_socketio import SocketIO, emit
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'change-this-secret-key-in-production'
 
-# Use gevent for production – no distutils dependency
-socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25, async_mode='gevent')
+# Default threading mode – no extra dependencies needed
+socketio = SocketIO(app, cors_allowed_origins="*", ping_timeout=60, ping_interval=25)
 
 clients = {}
 terminal_sessions = {}
@@ -757,5 +757,5 @@ def handle_ping():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    # Gevent takes care of production WSGI, no need for allow_unsafe_werkzeug
-    socketio.run(app, host='0.0.0.0', port=port, debug=False)
+    # Default threading mode uses Werkzeug, but for Render we allow unsafe Werkzeug
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
