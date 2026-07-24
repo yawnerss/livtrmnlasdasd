@@ -110,10 +110,18 @@ HTML_PAGE = r"""
         .term-tab.active { background: var(--accent); color: #0b0e14; }
         .close-term { cursor:pointer; color: var(--danger); opacity:0.7; font-size:0.9rem; }
         .close-term:hover { opacity:1; }
-        /* FIX: container uses flex:1 and non-absolute children */
-        #terminal-container { flex:1; padding:0.5rem; min-height:0; overflow:hidden; position:relative; }
-        #terminal-container > div { display:none; width:100%; height:100%; }
+        #terminal-container {
+            flex:1; padding:0.5rem; min-height:0; overflow:hidden;
+            position: relative;
+        }
+        #terminal-container > div {
+            display:none; width:100%; height:100%;
+        }
         #terminal-container > div.active { display:block; }
+        .empty-terminal {
+            display: flex; align-items: center; justify-content: center; flex:1;
+            color: var(--text-muted); flex-direction: column; gap: 1rem;
+        }
         .fullscreen-btn { margin-left:auto; background:transparent; border:none; color:var(--text-muted); cursor:pointer; font-size:1rem; }
         .fullscreen-btn:hover { color: var(--text); }
         .process-panel { flex:1; overflow:auto; background:var(--bg-card); border-radius:12px; }
@@ -230,7 +238,12 @@ HTML_PAGE = r"""
                         <button id="clear-terminal-btn" class="term-tab" title="Clear current terminal"><i class="fas fa-eraser"></i> Clear</button>
                         <button id="fullscreen-btn" class="fullscreen-btn" title="Fullscreen"><i class="fas fa-expand"></i></button>
                     </div>
-                    <div id="terminal-container"></div>
+                    <div id="terminal-container">
+                        <div class="empty-terminal" id="empty-terminal">
+                            <p>No terminals open</p>
+                            <button class="tab-btn" onclick="createNewTerminal()">+ New Terminal</button>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="tab-content" id="tab-processes">
@@ -263,7 +276,7 @@ HTML_PAGE = r"""
 <script>
 const socket = io();
 let currentClient = null;
-const clientTerminals = {}; // per client: { terminals, sessions, activeSessionId, tabCounter }
+const clientTerminals = {};
 let savedCommands = JSON.parse(localStorage.getItem('savedCommands') || '[]');
 let commandHistory = JSON.parse(localStorage.getItem('commandHistory') || '[]');
 let defaultFontSize = parseInt(localStorage.getItem('terminalFontSize') || '14');
@@ -335,8 +348,6 @@ function selectClient(sid) {
         if (data && Object.keys(data.terminals).length > 0) {
             const activeSession = data.activeSessionId || Object.keys(data.terminals)[0];
             switchTerminal(activeSession);
-        } else {
-            createNewTerminal();
         }
         return;
     }
@@ -350,6 +361,7 @@ function selectClient(sid) {
     }
 
     currentClient = sid;
+    localStorage.setItem('lastClientSid', sid);
     document.querySelectorAll('.client-card').forEach(c => c.classList.remove('active'));
     document.querySelector(`.client-card[data-sid="${sid}"]`)?.classList.add('active');
     document.getElementById('no-client').style.display = 'none';
@@ -362,7 +374,7 @@ function selectClient(sid) {
     rebuildTabBar(sid);
     const data = clientTerminals[sid];
     if (Object.keys(data.terminals).length === 0) {
-        createNewTerminal();
+        showEmptyTerminal();
     } else {
         const activeSession = data.activeSessionId || Object.keys(data.terminals)[0];
         switchTerminal(activeSession);
@@ -370,6 +382,15 @@ function selectClient(sid) {
 
     socket.emit('request_metrics', sid);
     switchMainTab('terminal');
+}
+
+function showEmptyTerminal() {
+    document.getElementById('empty-terminal').style.display = 'flex';
+    document.querySelectorAll('#terminal-container > div:not(#empty-terminal)').forEach(d => d.classList.remove('active'));
+}
+
+function hideEmptyTerminal() {
+    document.getElementById('empty-terminal').style.display = 'none';
 }
 
 function rebuildTabBar(clientSid) {
@@ -453,6 +474,7 @@ function createNewTerminal() {
         termDiv.id = `term-${sessionId}`;
         termDiv.className = 'active';
         document.getElementById('terminal-container').appendChild(termDiv);
+        hideEmptyTerminal();
 
         const term = new Terminal({
             cursorBlink: true,
@@ -479,13 +501,17 @@ function createNewTerminal() {
 function switchTerminal(sessionId) {
     if (!currentClient) return;
     const data = clientTerminals[currentClient];
-    document.querySelectorAll('#terminal-container > div').forEach(d => d.classList.remove('active'));
+    document.querySelectorAll('#terminal-container > div:not(#empty-terminal)').forEach(d => d.classList.remove('active'));
     const target = document.getElementById(`term-${sessionId}`);
-    if (target) target.classList.add('active');
+    if (target) {
+        target.classList.add('active');
+        hideEmptyTerminal();
+    } else {
+        showEmptyTerminal();
+    }
     data.activeSessionId = sessionId;
     document.querySelectorAll('.term-tab').forEach(b => b.classList.remove('active'));
     document.querySelector(`.term-tab[data-session="${sessionId}"]`)?.classList.add('active');
-    // Fit the newly visible terminal
     const term = data.terminals[sessionId];
     if (term) setTimeout(() => term._addon?.fit(), 50);
 }
@@ -506,7 +532,7 @@ function closeTerminal(sessionId) {
     }
     rebuildTabBar(currentClient);
     if (Object.keys(data.terminals).length === 0) {
-        createNewTerminal();
+        showEmptyTerminal();
     } else if (data.activeSessionId) {
         switchTerminal(data.activeSessionId);
     }
@@ -662,10 +688,58 @@ document.getElementById('refresh-processes-btn')?.addEventListener('click', () =
 });
 
 // ----- Socket events -----
-socket.on('connect', () => console.log('Connected'));
+socket.on('connect', () => {
+    console.log('Connected');
+    // Try to resume last client
+    const lastSid = localStorage.getItem('lastClientSid');
+    if (lastSid) {
+        socket.emit('resume_client', lastSid);
+    }
+    socket.emit('get_clients');
+});
+
 socket.on('client_list', renderClientList);
 socket.on('client_connected', data => showToast(`${data.name} connected`));
 socket.on('client_disconnected', data => showToast(`${data.name} disconnected`));
+
+socket.on('resume_info', (info) => {
+    // info contains target_sid and active_sessions
+    const target = info.target_sid;
+    if (target && clients[target]) {
+        selectClient(target); // this will create empty data structure
+        // Now add the existing sessions
+        const data = clientTerminals[target];
+        if (data && info.sessions) {
+            info.sessions.forEach(s => {
+                data.sessions[s.session_id] = { num: s.num };
+                const termDiv = document.createElement('div');
+                termDiv.id = `term-${s.session_id}`;
+                document.getElementById('terminal-container').appendChild(termDiv);
+                const term = new Terminal({
+                    cursorBlink: true,
+                    fontSize: defaultFontSize,
+                    theme: { background: '#0a0e17', foreground: '#e0e6f0' }
+                });
+                term.open(termDiv);
+                const fitAddon = new FitAddon.FitAddon();
+                term.loadAddon(fitAddon);
+                term._addon = fitAddon;
+                fitAddon.fit();
+                data.terminals[s.session_id] = term;
+                term.onResize(size => socket.emit('terminal_resize', { sessionId: s.session_id, cols: size.cols, rows: size.rows }));
+                term.onData(data => socket.emit('terminal_input', { sessionId: s.session_id, data }));
+                new ResizeObserver(() => fitAddon.fit()).observe(termDiv);
+            });
+            rebuildTabBar(target);
+            if (info.sessions.length > 0) {
+                switchTerminal(info.sessions[0].session_id);
+                hideEmptyTerminal();
+            } else {
+                showEmptyTerminal();
+            }
+        }
+    }
+});
 
 socket.on('metrics_update', data => {
     if (currentClient === data.sid) updateMetricsUI(data.metrics);
@@ -712,6 +786,12 @@ def handle_connect(auth=None):
 @socketio.on('disconnect')
 def handle_disconnect():
     sid = request.sid
+    # If this is a browser (watcher), keep the watcher mapping for potential reconnect
+    # Only remove client if it's a remote agent
+    if sid in clients:
+        # Check if it's a browser by presence in client_watchers keys
+        pass
+    # Clean up sessions owned by this sid (remote agent)
     dead = [s for s, owner in session_owners.items() if owner == sid]
     for s in dead:
         del session_owners[s]
@@ -720,6 +800,20 @@ def handle_disconnect():
     terminal_sessions.pop(sid, None)
     broadcast_client_list()
     emit('client_disconnected', {'name': name}, broadcast=True)
+
+@socketio.on('resume_client')
+def handle_resume_client(target_sid):
+    """Browser asks to resume management of a specific client."""
+    if target_sid not in clients:
+        return emit('error', {'message': 'Client not available'})
+    browser_sid = request.sid
+    client_watchers[target_sid] = browser_sid
+    # Gather active sessions for that target
+    sessions = terminal_sessions.get(target_sid, {})
+    session_list = []
+    for sess_id, data in sessions.items():
+        session_list.append({'session_id': sess_id, 'num': data.get('num', 0)})
+    emit('resume_info', {'target_sid': target_sid, 'sessions': session_list})
 
 @socketio.on('register_client')
 def handle_register(data):
@@ -756,7 +850,13 @@ def handle_new_terminal(target_sid):
     session_id = f"term_{int(time.time())}_{target_sid[:4]}"
     client_watchers[target_sid] = browser_sid
     session_owners[session_id] = target_sid
-    terminal_sessions.setdefault(target_sid, {})[session_id] = {'created': True}
+    # Store session metadata
+    if target_sid not in terminal_sessions:
+        terminal_sessions[target_sid] = {}
+    # Determine next terminal number
+    existing_nums = [d.get('num', 0) for d in terminal_sessions[target_sid].values()]
+    next_num = max(existing_nums, default=0) + 1
+    terminal_sessions[target_sid][session_id] = {'created': True, 'num': next_num}
     emit('spawn_terminal', {'session_id': session_id}, room=target_sid)
     return session_id
 
